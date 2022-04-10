@@ -3,8 +3,9 @@ Description
   Wcnss_filter provides mux/demux of Bluetooth and ANT data sent over the same
   UART channel
 
-# Copyright (c) 2013-2014 by Qualcomm Technologies, Inc.  All Rights Reserved.
-# Qualcomm Technologies Proprietary and Confidential.
+# Copyright (c) 2013-2014, 2016 Qualcomm Technologies, Inc.
+# All Rights Reserved.
+# Confidential and Proprietary - Qualcomm Technologies, Inc.
 
 ===========================================================================*/
 
@@ -47,20 +48,18 @@ Description
 #include <fcntl.h>
 #include <sys/un.h>
 #include <cutils/properties.h>
-#include "wcnss_ibs.h"
-#ifdef LOG_BT_ENABLE
-#include "bt_qxdmlog.h"
-#endif
 #include "private/android_filesystem_config.h"
+
+#ifdef LOG_TAG
+#undef LOG_TAG
+#endif
 
 #define LOG_TAG "WCNSS_FILTER"
 
 #define BT_SOCK "bt_sock"
 #define ANT_SOCK "ant_sock"
-//#define BT_HS_UART_DEVICE "/dev/ttyHS0"
-#define BT_HS_UART_DEVICE "/dev/ttyS1"
-#define PROC_PANIC_PATH     "/proc/sysrq-trigger"
-#define UART_IPC_LOG_PATH     "/sys/module/msm_serial_hs/parameters/debug_mask"
+
+#define BT_HS_UART_DEVICE "/dev/ttySAC0"
 
 #define BT_SSR_TRIGGERED 0xee
 
@@ -83,8 +82,8 @@ Description
 #define BT_EVT_HDR_LEN_OFFSET 1
 #define BT_CMD_HDR_LEN_OFFSET 2
 
-#define ANT_CMD_HDR_SIZE 2
-#define ANT_HDR_OFFSET_LEN 1
+#define ANT_CMD_HDR_SIZE      2
+#define ANT_HDR_OFFSET_LEN    1
 
 #ifndef BLUETOOTH_UID
 #define BLUETOOTH_UID 1002
@@ -112,15 +111,17 @@ pthread_mutex_t signal_mutex;
 
 int remote_bt_fd;
 int remote_ant_fd;
+
 int fd_transport;
-int fd_sysrq = -1;
-int fd_ipclog =-1;
+
 static pthread_t bt_mon_thread;
 static pthread_t ant_mon_thread;
+
 int copy_bt_data_to_channel(int src_fd, int dest_fd, unsigned char protocol_byte,int dir);
 int copy_ant_host_data_to_soc(int src_fd, int dest_fd, unsigned char protocol_byte);
+
 static void handle_cleanup();
-extern int bt_ssr_level ();
+static int do_write(int fd, unsigned char *buf, int len);
 
 unsigned char reset_cmpl[] = {0x04, 0x0e, 0x04, 0x01,0x03, 0x0c, 0x00};
 
@@ -208,12 +209,6 @@ static int establish_remote_socket(char *name)
     return fd;
 }
 
-void dump_buf(unsigned char* buf, int len) {
-    int i;
-    for (i=0; i<len; i++)
-        ALOGV("%x", buf[i]);
-}
-
 #ifdef DEBUG_MIMIC_CMD_TOUT
 /* This mimics the CMD TOUT by dropping the
  * "set Local name" command at filter
@@ -253,7 +248,9 @@ int handle_command_writes(int fd) {
     ALOGV("%s: ", __func__);
     unsigned char first_byte;
     int retval;
-    int ssrlevel;
+
+    ALOGV("%s: BT/ANT--Host-To-SoC: Reading 1st byte to determine the "
+        "sub-system(BT/ANT) and HCI PKT type(CMD/DATA)", __func__);
 
     retval = read (fd, &first_byte, 1);
     if (retval < 0) {
@@ -272,23 +269,15 @@ int handle_command_writes(int fd) {
         case ANT_DATA_PACKET_TYPE:
             ALOGV("%s: Ant data", __func__);
             retval = copy_ant_host_data_to_soc(fd, fd_transport, first_byte);
-            ALOGV("%s: copy_ant_data_to_channel returns %d", __func__, retval);
             break;
         case BT_EVT_PACKET_TYPE:
         case BT_ACL_PACKET_TYPE:
         case BT_CMD_PACKET_TYPE:
             ALOGV("%s: BT data", __func__);
-            retval = copy_bt_data_to_channel(fd, fd_transport, first_byte,HOST_TO_SOC);
+            retval = copy_bt_data_to_channel(fd, fd_transport, first_byte, HOST_TO_SOC);
             break;
         case BT_SSR_TRIGGERED:
             ALOGV("It is SSR triggered from command tout");
-#ifdef LOG_BT_ENABLE
-            dump_uart_ipc_logs();
-            ssrlevel = bt_ssr_level();
-            if (ssrlevel == 1 || ssrlevel == 2) {
-                bt_kernel_panic();
-            }
-#endif
             break;
         default:
             ALOGE("%s: Unexpected data format!!",__func__);
@@ -326,31 +315,20 @@ static int bt_thread() {
             if (FD_ISSET(remote_bt_fd, &client_fds)) {
                 retval = handle_command_writes(remote_bt_fd);
                 ALOGV("%s: handle_command_writes . %d", __func__, retval);
-#ifdef WCNSS_IBS_ENABLED
-                ALOGV("%s: tx complete",__FUNCTION__);
-                wcnss_tx_done(true);
-#endif
-               if(retval < 0) {
-                   if (retval == -99) {
-                       ALOGV("%s:End of wait loop", __func__);
-                   }
-                   ALOGV("%s: handle_command_writes returns: %d: ", __func__, retval);
-                   if(fd_ipclog !=-1) {
-                       /* Set UART IPC log mask to 3 for warning level */
-                       char ipc_level ='3';
-                       ALOGI("%s: write: %s to %c", __func__, UART_IPC_LOG_PATH, ipc_level);
-                       if(write(fd_ipclog, &ipc_level, 1) < 0)
-                           ALOGE("%s: Failed to write: %s, errno: %d",__func__, strerror(errno), errno);
-                   }
-                   handle_cleanup();
-                   break;
+                if(retval < 0) {
+                    if (retval == -99) {
+                        ALOGV("%s:End of wait loop", __func__);
+                    }
+                    ALOGV("%s: handle_command_writes returns: %d: ", __func__, retval);
+                    break;
                 }
             }
         } while(1);
 
-        ALOGV("%s: Bluetooth turned off", __func__);
+        ALOGI("%s: Bluetooth turned off", __func__);
         close(remote_bt_fd);
         remote_bt_fd = 0;
+        handle_cleanup();
     } while(1);
 
     pthread_exit(NULL);
@@ -378,7 +356,7 @@ static int ant_thread() {
                 ALOGE("Select: failed: %s", strerror(errno));
                 break;
             }
-            ALOGV("%s: select cameout out: (%s)\n", __func__, strerror(errno));
+            ALOGV("%s: Step 2-ANT-HTS: ANT CMD/DATA available for processing...\n", __func__);
             if (FD_ISSET(remote_ant_fd, &client_fds)) {
                 retval = handle_command_writes(remote_ant_fd);
                 if(retval < 0) {
@@ -386,21 +364,16 @@ static int ant_thread() {
                        ALOGV("%s:End of wait loop", __func__);
                    }
                    ALOGV("%s: handle_command_writes returns: %d: ", __func__, retval);
-                   handle_cleanup();
                    break;
                 }
             }
             ALOGV("%s: moving back to Select loop", __func__);
-#ifdef WCNSS_IBS_ENABLED
-            ALOGV("%s: tx complete",__FUNCTION__);
-            wcnss_tx_done(true);
-#endif
-
         } while(1);
 
-        ALOGV("%s: ANT turned off", __func__);
+        ALOGI("%s: ANT turned off", __func__);
         close(remote_ant_fd);
         remote_ant_fd = 0;
+        handle_cleanup();
     } while(1);
 
     pthread_exit(NULL);
@@ -414,22 +387,19 @@ static int init_transport() {
 
     ALOGV("%s: Entry ", __func__);
 
-    if ((fd_transport = open(BT_HS_UART_DEVICE, O_RDWR)) == -1)
-    {
+    if ((fd_transport = open(BT_HS_UART_DEVICE, O_RDWR)) == -1) {
         ALOGE("%s: Unable to open %s: %d (%s)", __func__, BT_HS_UART_DEVICE,
            fd_transport, strerror(errno));
         return -1;
     }
 
-    if (tcflush(fd_transport, TCIOFLUSH) < 0)
-    {
+    if (tcflush(fd_transport, TCIOFLUSH) < 0) {
         ALOGE("issue while tcflush %s", BT_HS_UART_DEVICE);
         close(fd_transport);
         return -1;
     }
 
-    if (tcgetattr(fd_transport, &term) < 0)
-    {
+    if (tcgetattr(fd_transport, &term) < 0) {
         ALOGE("issue while tcgetattr %s", BT_HS_UART_DEVICE);
         close(fd_transport);
         return -1;
@@ -439,29 +409,25 @@ static int init_transport() {
     /* Set RTS/CTS HW Flow Control*/
     term.c_cflag |= (CRTSCTS | stop_bits);
 
-    if (tcsetattr(fd_transport, TCSANOW, &term) < 0)
-    {
+    if (tcsetattr(fd_transport, TCSANOW, &term) < 0) {
        ALOGE("issue while tcsetattr %s", BT_HS_UART_DEVICE);
        close(fd_transport);
        return -1;
     }
 
-    if (tcflush(fd_transport, TCIOFLUSH) < 0)
-    {
+    if (tcflush(fd_transport, TCIOFLUSH) < 0) {
         ALOGE("after enabling flags issue while tcflush %s", BT_HS_UART_DEVICE);
         close(fd_transport);
         return -1;
     }
 
-    if (tcsetattr(fd_transport, TCSANOW, &term) < 0)
-    {
+    if (tcsetattr(fd_transport, TCSANOW, &term) < 0) {
        ALOGE("issue while tcsetattr %s", BT_HS_UART_DEVICE);
        close(fd_transport);
        return -1;
     }
 
-    if (tcflush(fd_transport, TCIOFLUSH) < 0)
-    {
+    if (tcflush(fd_transport, TCIOFLUSH) < 0) {
         ALOGE("after enabling flags issue while tcflush %s", BT_HS_UART_DEVICE);
         close(fd_transport);
         return -1;
@@ -471,41 +437,77 @@ static int init_transport() {
     cfsetospeed(&term, baud);
     cfsetispeed(&term, baud);
     tcsetattr(fd_transport, TCSANOW, &term);
-#ifdef WCNSS_IBS_ENABLED
-    wcnss_ibs_init(fd_transport);
-#endif
     ALOGV("%s returns fd: %d", __func__, fd_transport);
     return fd_transport;
 }
 
-bool isIBSByte(unsigned char byte) {
-    ALOGV("%s>", __func__);
-    if (byte == IBS_WAKE_ACK || byte == IBS_WAKE_IND || byte == IBS_SLEEP_IND) {
-        return true;
-    }
-    return false;
+static int do_write(int fd, unsigned char *buf,int len)
+{
+    int ret = 0;
+    int write_offset = 0;
+    int write_len = len;
+    do {
+        ret = write(fd, buf+write_offset, write_len);
+        if (ret < 0)
+        {
+            ALOGE("%s: write failed ret = %d err = %s",__func__,ret,strerror(errno));
+            return -1;
+
+        } else if (ret == 0) {
+            ALOGE("%s: Write returned 0, err = %s, Written bytes: %d, expected: %d",
+                        __func__, strerror(errno), (len-write_len), len);
+            return (len-write_len);
+
+        } else {
+            if (ret < write_len)
+            {
+               ALOGD("%s, Write pending,do write ret = %d err = %s",__func__,ret,
+                       strerror(errno));
+               write_len = write_len - ret;
+               write_offset = ret;
+            } else if (ret > write_len) {
+               ALOGE("%s: FATAL wrote more than expected: written bytes: %d expected: %d",
+                      __func__, write_len, ret);
+               break;
+            } else {
+               ALOGV("Write successful");
+               break;
+            }
+        }
+    } while(1);
+    return len;
 }
 
 int do_read(int fd, unsigned char* buf, size_t len) {
-   int bytes_left, bytes_read, read_offset;
+   int bytes_left, bytes_read = 0, read_offset;
+
+   if (!len) {
+      ALOGV("%s: read returned with len 0.", __func__);
+      return 0;
+   }
 
    bytes_left = len;
    read_offset = 0;
 
    do {
        bytes_read = read(fd, buf+read_offset, bytes_left);
-       if (bytes_left < 0) {
-           ALOGE("%s: Read error: %d", __func__, bytes_left);
+       if (bytes_read < 0) {
+           ALOGE("%s: Read error: %d (%s)", __func__, bytes_left, strerror(errno));
            return -1;
+       } else if (bytes_read == 0) {
+            ALOGE("%s: read returned 0, err = %s, read bytes: %d, expected: %d",
+                              __func__, strerror(errno),(unsigned int) (len-bytes_left),(unsigned int) len);
+            return (len-bytes_left);
        }
-
-       if (bytes_read < bytes_left) {
-           ALOGV("Still there are %d bytes to read", bytes_left-bytes_read);
-           bytes_left = bytes_left-bytes_read;
-           read_offset = read_offset+bytes_read;
-       } else {
-           ALOGV("%s: done with read",__func__);
-           break;
+       else {
+           if (bytes_read < bytes_left) {
+              ALOGV("Still there are %d bytes to read", bytes_left-bytes_read);
+              bytes_left = bytes_left-bytes_read;
+              read_offset = read_offset+bytes_read;
+           } else {
+              ALOGV("%s: done with read",__func__);
+              break;
+           }
        }
    }while(1);
    return len;
@@ -589,13 +591,7 @@ int copy_bt_data_to_channel(int src_fd, int dest_fd, unsigned char protocol_byte
                ALOGE("%s:error in reading hdr: %d", __func__, retval);
                return -1;
            }
-#ifdef WCNSS_IBS_ENABLED
-            if(hdr[0] == 0x13)
-            {
-                ALOGV("completed packet event: device can sleep\n");
-//                wcnss_device_can_sleep();
-            }
-#endif
+
            len = hdr[BT_EVT_HDR_LEN_OFFSET];
            ALOGV("len: %d\n", len);
            buf = (unsigned char*)calloc(len+BT_EVT_HDR_SIZE+1, sizeof(char));
@@ -645,39 +641,13 @@ int copy_bt_data_to_channel(int src_fd, int dest_fd, unsigned char protocol_byte
          return retval;
       }
 #endif//IGNORE_HCI_RESET
-#ifdef WCNSS_IBS_ENABLED
-     if(direction == HOST_TO_SOC)
-     {
-         ALOGV("%s: Assert BT SOC",__FUNCTION__);
-         retval = wcnss_wake_assert();
-         if(retval == -1)
-          {
-            ALOGE("%s:Failed to assert SoC",__func__);
-            free(buf);
-            return 0;
-          }
-     }
-#endif
 
-#ifdef LOG_BT_ENABLE
-     if((buf[0] == LOG_BT_EVT_PACKET_TYPE && buf[1] == LOG_BT_EVT_VENDOR_SPECIFIC &&
-        buf[3] == LOG_BT_CONTROLLER_LOG) || is_snoop_log_enabled()) {
-        send_btlog_pkt(buf, acl_len, direction);
-     }
-//#endif
-     if (buf[0] == LOG_BT_EVT_PACKET_TYPE && buf[1] == LOG_BT_EVT_VENDOR_SPECIFIC && buf[3] == LOG_BT_CONTROLLER_LOG)
-     {
-        // Log event from controller. Should not be sent to the stack. Free it here.
-        free(buf);
-        return 0;
-     }
-#endif
      pthread_mutex_lock(&signal_mutex);
-     retval = write(dest_fd, buf, acl_len);
+     retval = do_write(dest_fd, buf, acl_len);
      pthread_mutex_unlock(&signal_mutex);
      if (retval < 0) {
          ALOGE("%s:error in writing buf: %d: %s", __func__, retval, strerror(errno));
-         if (errno == EPIPE) {
+         if (errno == EPIPE || errno == EBADF) {
              ALOGV("%s: BT has closed of the other end", __func__);
              /*return 0, so that read loop continues*/
              retval = 0;
@@ -688,16 +658,16 @@ int copy_bt_data_to_channel(int src_fd, int dest_fd, unsigned char protocol_byte
          return retval;
      }
 
-     ALOGV("Direction(%d): bytes sent*", direction);
+     ALOGV("Direction(%d): bytes: %d : bytes_written: %d", direction, acl_len, retval);
      for (i =0; i<acl_len; i++) {
          ALOGV("%x-", buf[i]);
      }
-    ALOGV("*done");
+     ALOGV("*done");
 
-    ALOGV("%s: copied bt data/cmd (of len %d) succesfully\n", __func__, acl_len);
+     ALOGV("%s: copied bt data/cmd (of len %d) succesfully\n", __func__, acl_len);
 
-    free(buf);
-    return retval;
+     free(buf);
+     return retval;
 }
 
 
@@ -739,12 +709,9 @@ int copy_ant_host_data_to_soc(int src_fd, int dest_fd, unsigned char protocol_by
     }
 
     memcpy(ant_pl, hdr, ANT_CMD_HDR_SIZE);
-#ifdef WCNSS_IBS_ENABLED
-    ALOGV("%s: Assert BT SOC for ANT DATA",__FUNCTION__);
-    wcnss_wake_assert();
-#endif
+
     pthread_mutex_lock(&signal_mutex);
-    retval = write(dest_fd, ant_pl, len+ANT_CMD_HDR_SIZE);
+    retval = do_write(dest_fd, ant_pl, len+ANT_CMD_HDR_SIZE);
     pthread_mutex_unlock(&signal_mutex);
     if (retval < 0) {
         ALOGE("write returns err: file_desc: %d %d(%s)\n", dest_fd, retval,strerror(errno));
@@ -777,14 +744,14 @@ int copy_ant_data_to_channel(int src_fd, int dest_fd, unsigned char protocol_byt
     }
 
     ALOGV("%s: size of the data is: %d\n", __func__, len);
-    ant_pl = (unsigned char*)malloc(len+1);
+    ant_pl = (unsigned char*)malloc(len+2);
 
     if (ant_pl == NULL) {
         ALOGE("Malloc error\n");
         return -1;
     }
 
-    ret = do_read(src_fd, ant_pl+1, (int)len);
+    ret = do_read(src_fd, ant_pl+2, (int)len);
     if (ret < 0) {
         ALOGE("read returns err: %d\n", ret);
         retval = -1;
@@ -801,14 +768,15 @@ int copy_ant_data_to_channel(int src_fd, int dest_fd, unsigned char protocol_byt
     if (ret < len)
         ALOGV("%s: expected %d bytes, recieved only %d", __func__, len, ret);
 
-    ant_pl[0] = len;
+    ant_pl[0] = protocol_byte;
+    ant_pl[1] = len;
     pthread_mutex_lock(&signal_mutex);
-    ret = write(dest_fd, ant_pl, ret+1);
+    ret = do_write(dest_fd, ant_pl+1, ret+1);
     pthread_mutex_unlock(&signal_mutex);
 
     if (ret < 0) {
         ALOGE("write returns err: file_desc: %d %d(%s)\n", dest_fd, ret,strerror(errno));
-        if (errno == EPIPE) {
+        if (errno == EPIPE || errno == EBADF) {
             ALOGV("%s: ANT has closed of the other end", __func__);
              /*return 0, so that read loop continues*/
              retval = 0;
@@ -844,13 +812,6 @@ int handle_soc_events(int fd_transport) {
     }
 
     ALOGV("%s: protocol_byte: %x", __func__, first_byte);
-    if (isIBSByte(first_byte)) {
-        ALOGV("%s: sleep byte", __func__);
-#ifdef WCNSS_IBS_ENABLED
-        ibs_recv_ibs_cmd(&first_byte);
-#endif
-        return 0;
-    }
 
     switch(first_byte) {
         case ANT_CTL_PACKET_TYPE:
@@ -880,8 +841,7 @@ static int start_reader_thread() {
     int n = 0, retval;
     ALOGV("%s: Entry ", __func__);
 
-    if ((fd_transport = init_transport()) == -1)
-    {
+    if ((fd_transport = init_transport()) == -1) {
         ALOGE("unable to initialize transport %s", BT_HS_UART_DEVICE);
         return -1;
     }
@@ -903,8 +863,13 @@ static int start_reader_thread() {
         }
 
         ALOGV("%s: Select comes out\n", __func__);
+        if (fd_transport < 0) {
+            ALOGE("%s: fd_transport is already deinit, exit loop",__func__);
+            retval = -1;
+            break;
+        }
 
-        if (FD_ISSET(fd_transport, &input))        {
+        if (FD_ISSET(fd_transport, &input)) {
              retval = handle_soc_events(fd_transport);
              if(retval < 0) {
                  ALOGE("%s: handle_soc_events returns: %d: ", __func__, retval);
@@ -924,96 +889,49 @@ int cleanup_thread(pthread_t thread) {
     int status = 0;
     ALOGV("%s: Entry", __func__);
 
-    if((status = pthread_kill(thread, SIGUSR1)) != 0) {
-        ALOGE("Error cancelling thread %d, error = %d (%s)",
-        (int)thread, status, strerror(status));
-    }
-
     if((status = pthread_join(thread, NULL)) != 0) {
         ALOGE("Error joining thread %d, error = %d (%s)",
       (int)thread, status, strerror(status));
     }
-#ifdef WCNSS_IBS_ENABLED
-    wcnss_ibs_cleanup();
-#endif
     ALOGV("%s: End", __func__);
     return status;
 }
 
 int main() {
+    int ret;
     ALOGV("%s: Entry", __func__);
     signal(SIGPIPE, SIG_IGN);
-
-    ALOGV("%s: open: %s", __func__, PROC_PANIC_PATH);
-    fd_sysrq = open(PROC_PANIC_PATH, O_RDWR);
-    if(fd_sysrq < 0) {
-        ALOGE("%s: open (%s) fail - %s (%d)", __func__,
-            PROC_PANIC_PATH, strerror(errno), errno);
-        return -1;
-    }
-
-    if(fd_ipclog == -1) {
-        ALOGI("%s: open: %s", __func__, UART_IPC_LOG_PATH);
-        fd_ipclog = open (UART_IPC_LOG_PATH, O_RDWR);
-    }
-    if(fd_ipclog < 0) {
-        ALOGE("%s: open (%s) fail - %s (%d)", __func__,
-            UART_IPC_LOG_PATH, strerror(errno), errno);
-    } else {
-        /* Set UART IPC log mask to 4 for debug level */
-        char ipc_level ='4';
-        ALOGI("%s: write: %s to %c", __func__, UART_IPC_LOG_PATH, ipc_level);
-        if(write(fd_ipclog, &ipc_level, 1) < 0)
-            ALOGE("%s: Failed to write: %s, errno: %d",__func__, strerror(errno), errno);
-    }
-
-    /* Drop privilieges to bluetooth user */
-    ALOGV("%s: setgid: %d", __func__, AID_BLUETOOTH);
-    if (setgid(AID_BLUETOOTH) != 0) {
-        ALOGE("%s: setgid (%d) fail - %s (%d)", __func__,
-            AID_BLUETOOTH, strerror(errno), errno);
-        return -1;
-    }
-
-    ALOGV("%s: setuid: %d", __func__, AID_BLUETOOTH);
-    if (setuid(AID_BLUETOOTH ) != 0) {
-        ALOGE("%s: setuid (%d) fail - %s (%d)", __func__,
-            AID_BLUETOOTH, strerror(errno), errno);
-        return -1;
-    }
 
     pthread_mutex_init(&signal_mutex, NULL);
     if (pthread_create(&bt_mon_thread, NULL, (void *)bt_thread, NULL) != 0) {
         perror("pthread_create for bt_monitor");
-        pthread_mutex_destroy(&signal_mutex);
-        return -1;
+        ret = -1;
+        goto bt_thread_fail;
     }
 
     if (pthread_create(&ant_mon_thread, NULL, (void *)ant_thread, NULL) != 0) {
         perror("pthread_create for ant_monitor");
-        cleanup_thread(bt_mon_thread);
-        pthread_mutex_destroy(&signal_mutex);
-        return -1;
+        ret = -1;
+        goto ant_thread_fail;
     }
 
-#ifdef LOG_BT_ENABLE
-    diag_init();
-#endif
     /*Main thread monitors on UART data/events*/
-    int ret = start_reader_thread();
+    ret = start_reader_thread();
 
     if (ret < 0) {
         ALOGE("%s: start_reader_thread returns: %d", __func__, ret);
     }
 
+ant_thread_fail:
     cleanup_thread(ant_mon_thread);
+bt_thread_fail:
     cleanup_thread(bt_mon_thread);
+
     pthread_mutex_destroy(&signal_mutex);
 
-#ifdef LOG_BT_ENABLE
-    diag_deinit();
-#endif
     ALOGV("%s: Exit: %d", __func__, ret);
+    property_set("wc_transport.hci_filter_status", "0");
+    property_set("wc_transport.start_hci", "false");
     return ret;
 }
 
@@ -1037,35 +955,21 @@ static void handle_cleanup()
          property_set("wc_transport.ref_count", ref_count);
       }
     }
-    else {
-      if(ref_val == 1) {
-        ALOGE("VOTOFF Clk before shutdown");
-#ifdef WCNSS_IBS_ENABLED
-        wcnss_vote_off_clk();
-#endif
-      }
+    if (!remote_bt_fd && !remote_ant_fd) {
+        char value[PROPERTY_VALUE_MAX] = {'\0'};
+
+        ALOGD("%s",__func__);
+
+        property_get("wc_transport.hci_filter_status", value, "0");
+        if (!strcmp(value, "0")) {
+            ALOGI("%s: wcnss_filter has been stopped already", __func__);
+            return;
+        } else
+            property_set("wc_transport.hci_filter_status", "0");
+
+        //property_set("wc_transport.soc_initialized", "0");
+        property_set("wc_transport.start_hci", "false");
+        ALOGE("Done with this Life!!!");
+        exit(0);
     }
-}
-
-static void cleanup_and_suicide()
-{
-    //Set REF count 1, so that next trial to reset the BT succeeds
-    property_set("wc_transport.ref_count", "1");
-    property_set("wc_transport.hci_filter_status", "0");
-    property_set("wc_transport.soc_initialized", "0");
-    ALOGE("Done with this Life!!!");
-    exit(0);
-}
-
-
-void report_soc_failure(void)
-{
-   char eve_buf[] = {0x04,0x10,0x01,0x0f};
-   int ret_val;
-   ALOGD("%s",__func__);
-   ret_val = write(remote_bt_fd,eve_buf,4);
-   if(ret_val < 0)
-    ALOGE("%s: Failed to report",__func__);
-
-   cleanup_and_suicide();
 }
