@@ -847,7 +847,7 @@ static int start_reader_thread() {
     }
 
     /*Indicate that, server is ready to accept*/
-    property_set("wc_transport.hci_filter_status", "1");
+    property_set("vendor.wc_transport.hci_filter_status", "1");
 
     FD_ZERO(&input);
     FD_SET(fd_transport, &input);
@@ -930,8 +930,8 @@ bt_thread_fail:
     pthread_mutex_destroy(&signal_mutex);
 
     ALOGV("%s: Exit: %d", __func__, ret);
-    property_set("wc_transport.hci_filter_status", "0");
-    property_set("wc_transport.start_hci", "false");
+    property_set("vendor.wc_transport.hci_filter_status", "0");
+    property_set("vendor.wc_transport.start_hci", "false");
     return ret;
 }
 
@@ -942,17 +942,17 @@ static void handle_cleanup()
     int ref_val,clean;
 
     ALOGE("wcnss_filter client is terminated");
-    property_get("wc_transport.clean_up", cleanup, "0");
+    property_get("vendor.wc_transport.clean_up", cleanup, "0");
     clean = atoi(cleanup);
     ALOGE("clean Value =  %d",clean);
-    property_get("wc_transport.ref_count", ref_count, "0");
+    property_get("vendor.wc_transport.ref_count", ref_count, "0");
     ref_val = atoi(ref_count);
     if(clean == 0) {
       if(ref_val > 0)
       {
          ref_val--;
          snprintf(ref_count, 3, "%d", ref_val);
-         property_set("wc_transport.ref_count", ref_count);
+         property_set("vendor.wc_transport.ref_count", ref_count);
       }
     }
     if (!remote_bt_fd && !remote_ant_fd) {
@@ -960,15 +960,15 @@ static void handle_cleanup()
 
         ALOGD("%s",__func__);
 
-        property_get("wc_transport.hci_filter_status", value, "0");
+        property_get("vendor.wc_transport.hci_filter_status", value, "0");
         if (!strcmp(value, "0")) {
             ALOGI("%s: wcnss_filter has been stopped already", __func__);
             return;
         } else
-            property_set("wc_transport.hci_filter_status", "0");
+            property_set("vendor.wc_transport.hci_filter_status", "0");
 
-        //property_set("wc_transport.soc_initialized", "0");
-        property_set("wc_transport.start_hci", "false");
+        //property_set("vendor.wc_transport.soc_initialized", "0");
+        property_set("vendor.wc_transport.start_hci", "false");
         ALOGE("Done with this Life!!!");
         exit(0);
     }
