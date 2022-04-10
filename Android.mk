@@ -23,4 +23,6 @@ LOCAL_SHARED_LIBRARIES := libutils libcutils liblog
 LOCAL_MODULE := wcnss_filter
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_VENDOR_MODULE := true
+
 include $(BUILD_EXECUTABLE)
